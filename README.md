@@ -1,7 +1,7 @@
 # Alarmo SIA DC-09 Bridge
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.4-blue.svg)
 
 An amateur-grade Home Assistant integration that bridges **Alarmo** to any Central Monitoring Station (CMS) using the **SIA DC-09 (SIA-DCS)** protocol. 
 
@@ -14,6 +14,8 @@ An amateur-grade Home Assistant integration that bridges **Alarmo** to any Centr
 * **Complete Event Lifecycle:** Reports not just alarms, but also Restores (`FH`, `BH`), Cancels (`BC`), and Arming/Disarming (`CL`/`OP`).
 * **Automatic Heartbeat:** Sends Routine Test (`RP`) packets to ensure the link is always alive.
 * **Professional Logic:** Sanitizes entity names for strict protocol compatibility.
+* AC power trouble detection with binary sensor or numeric value.
+* Unavailable sensor detection.
 
 ## 🚀 Installation
 
@@ -39,6 +41,7 @@ Click **Configure** on the integration card to access advanced features:
 * **Photo Verification:** * Select one or more **Camera Entities**.
     * Provide your **Base URL** (e.g., `https://your-ha-instance.duckdns.org`). *Note: Do not add a trailing slash.*
 * **Sensor Mapping:** Group your sensors into Fire, Water, Gas, or Panic categories to ensure the correct 2-letter SIA code is transmitted.
+* **Offline sensor detection:** add entities to be monitored in *offline_sensors*
 
 ## 🛠 How it Works (SIA Payload Anatomy)
 
@@ -57,3 +60,6 @@ The bridge constructs a standard-compliant string for the dispatcher:
 
 ## 📄 License
 License stuff. Yes.
+
+
+
