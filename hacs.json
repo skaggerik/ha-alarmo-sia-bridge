@@ -1,5 +1,3 @@
 {
   "name": "Alarmo SIA DC-09 Bridge",
-  "content_type": "integration",
-  "homeassistant": "2024.1.0"
 }
