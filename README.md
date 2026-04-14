@@ -75,7 +75,7 @@ The payload structure adapts dynamically based on your chosen **Photo Verificati
 
 * **Standard (No Photo):** `[#1234|Nri1/BA^Kitchen_Window]`
 * **Extended (SIA-DC-03):** `[#1234|Nri1/BA^Kitchen_Window|Url:https://...]`
-* **Ajax 'V' (Dedicated Video Block):** `[#1234|Nri1/BA^Kitchen_Window][Vhttps://...]`
+* **Ajax 'V' (Dedicated Video Block):** `[#1234|Nri1/BA^Kitchen_Window][Vhttps://...]` (this has been tested with a CMS in Sweden)
 * **Modern (SIA-DC-09-2021):** `[#1234|Nri1/BA^Kitchen_Window][#1234|Mhttps://...]`
 
 ---
