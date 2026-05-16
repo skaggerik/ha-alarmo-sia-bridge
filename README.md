@@ -1,18 +1,14 @@
 # Alarmo SIA DC-09 Bridge
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.1.1-blue.svg)
 
 A Home Assistant integration that bridges **Alarmo** to any Central Monitoring Station (CMS) using the **SIA DC-09 (SIA-DCS)** protocol. All code happens to be machine generated but seems to work well. 
 
-## ✨ Features (New in v1.1.0)
+## ✨ Features (New in v1.1.1)
 
-* **Failover Routing:** True Primary/Secondary CMS redundancy with application-level `[ACK]` validation and automatic failback capabilities.
-* **Persistent Sequence Tracking:** Saves the packet sequence to your local storage to prevent CMS synchronization errors during Home Assistant restarts.
-* **Custom Sequence Override:** Allows you to manually inject the next sequence number during a fresh installation.
-* **Live Diagnostic Sensors:** Exposes unencrypted packet logs, exact routing statuses (Tx/Rx), and the current sequence number directly to your Home Assistant dashboard.
-* **3 Visual Verification Methods:** Captures snapshots from multiple cameras and formats the packet according to your specific CMS requirements (Extended DC-03, Ajax 'V', or Modern DC-09-2021).
-* **Advanced Health Monitoring:** Tracks AC Power loss and Offline sensors with configurable grace periods to prevent false dispatches during brief network flickers.
+* **Advanced Health Monitoring:** Tracks AC Power loss, UPS Battery States (NUT UPS integration), and Offline sensors with configurable grace periods to prevent false dispatches during brief network flickers.
+* **Tamper Sensor Mapping:** Automatically routes physical tamper switches using dedicated `TA` (Tamper Alarm) and `TR` (Tamper Restored) SIA codes.
 
 ---
 
@@ -44,18 +40,34 @@ To prevent spamming the CMS during internet flickers or brief Home Assistant reb
 ### Offline Sensor Monitoring
 By default, the bridge does not track offline sensors. **For offline detection to work, you must manually add the entities you want to monitor** in the Options menu under the *Offline Sensors* field.
 
-### AC Power Monitoring (Binary vs. Numeric)
-You can monitor your home's main power using either a Binary Sensor (on/off) or a Numeric Sensor (voltage/percentage). 
+### Tamper Monitoring
+You can map specific binary sensors as Tamper devices (such as the cover switch on your external siren or panel box). When the sensor turns `on` (open), the bridge immediately sends a `TA` (Tamper Alarm) event. When it turns `off` (closed), it sends a `TR` (Tamper Restored) event. 
+
+### AC Power Monitoring (Binary, Numeric & NUT UPS Strings)
+You can monitor your home's main power using three different methods, depending on your hardware: 
 * **Numeric Sensor:** Select your sensor and set the `ac_threshold` (e.g., `210` for voltage, or `10` for battery percentage). If the sensor drops *below* this value, it triggers an AC Trouble alarm.
 * **Binary Sensor:** The integration uses the sensor's assigned `device_class` to determine what state constitutes an alarm:
   * If the device class is **`problem`** or **`battery`**: The state **`on`** means trouble (power lost).
   * For **all other device classes** (e.g., `power`, `plug`, or no class): The state **`off`** means trouble (power lost).
+* **String Sensor (NUT UPS):** If you are using the Network UPS Tools (NUT) integration, your UPS status is usually reported as a text string (e.g., "OB DISCHRG" or "OL CHRG"). Select your UPS status entity under the `ac_string_sensor` field. The integration elegantly parses the raw text:
+  * If the text contains **`OB`** (On Battery), the integration interprets this as power lost and triggers an `AT` (AC Trouble) event.
+  * If the text contains **`OL`** (On Line), it interprets this as power restored and triggers an `AR` (AC Restored) event.
+
+---
+
+## 📡 Diagnostics & Connection Health
+
+To ensure your system is properly communicating with the CMS, the integration exposes three live entities to your dashboard:
+
+1. **Connection Status (The "All-Is-Okay" Sensor):** A `binary_sensor` utilizing the `problem` device class. If the last transmission to the CMS received a successful `[ACK]`, the sensor shows as **OK** (Off). If a transmission times out, receives a `[NAK]`, or fails entirely, the sensor immediately switches to **Problem** (On). *You can use this sensor to trigger push notifications to your phone if your house loses its connection to the monitoring station!*
+2. **SIA History:** A sensor that displays the unencrypted payload of your last transmission, the exact reply received from the CMS, and the routing status. Its attributes contain a rolling log of your last 50 events.
+3. **Last Sequence:** A counter showing the exact sequence number appended to the last successful packet.
 
 ---
 
 ## 🔄 Primary & Backup Failover Logic
 
-Version 1.1.0 introduces true commercial hardware routing. You can optionally configure a **Secondary CMS** (including different IP, Port, and Protocol) in the Options menu. 
+Version 1.1.1 utilizes true commercial hardware routing. You can optionally configure a **Secondary CMS** (including different IP, Port, and Protocol) in the Options menu. 
 
 Here is exactly how the bridge handles routing:
 
