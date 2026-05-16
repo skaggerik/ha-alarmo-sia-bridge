@@ -15,7 +15,7 @@ from pysiaalarm import SIAAccount
 from .const import DOMAIN, SIA_MAPPING, SENSOR_TYPES, RESTORE_MAP
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = ["sensor"]
+PLATFORMS = ["sensor", "binary_sensor"]
 
 async def async_setup_entry(hass: HomeAssistant, entry):
     merged_conf = {**entry.data, **entry.options}
@@ -28,10 +28,10 @@ async def async_setup_entry(hass: HomeAssistant, entry):
         await hass.async_add_executor_job(os.makedirs, snapshot_path)
 
     store = Store(hass, 1, f"{DOMAIN}_seq_{entry.entry_id}")
-    saved_data = await store.async_load()
+    saved_data = await store.async_load() or {}
     
-    # Use saved sequence, or fallback to the manual override provided in initial setup
-    current_seq = saved_data.get("seq") if saved_data else merged_conf.get("starting_sequence", 1)
+    current_seq = saved_data.get("seq", merged_conf.get("starting_sequence", 1))
+    ac_trouble_saved = saved_data.get("ac_trouble", False)
 
     account = SIAAccount(account_id, key=merged_conf.get("key"))
     
@@ -41,7 +41,7 @@ async def async_setup_entry(hass: HomeAssistant, entry):
         "last_seq": "None", 
         "current_route": "primary", 
         "active_alarms": set(), 
-        "ac_trouble": False,
+        "ac_trouble": ac_trouble_saved,
         "timers": {},
         "offline_sensors": set(),
         "history": deque(maxlen=50) 
@@ -49,14 +49,18 @@ async def async_setup_entry(hass: HomeAssistant, entry):
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    async def save_storage():
+        mem = hass.data[DOMAIN][entry.entry_id]
+        await store.async_save({"seq": mem["seq"], "ac_trouble": mem["ac_trouble"]})
+
     def create_sia_packet(code, zone, message="", url=""):
         now = datetime.now(timezone.utc).strftime("%H:%M:%S,%m-%d-%Y")
         mem = hass.data[DOMAIN][entry.entry_id]
         
         seq_str = str(mem["seq"]).zfill(4)
-        mem["last_seq"] = seq_str # Store exactly what we are about to transmit
+        mem["last_seq"] = seq_str 
         mem["seq"] = (mem["seq"] % 9999) + 1
-        hass.async_create_task(store.async_save({"seq": mem["seq"]}))
+        hass.async_create_task(save_storage())
 
         clean_msg = message.replace(' ', '_').replace('/', '_')
         photo_method = merged_conf.get("photo_method", "extended_message")
@@ -94,12 +98,9 @@ async def async_setup_entry(hass: HomeAssistant, entry):
             sock.sendto(packet_bytes, (t_host, t_port))
             data, _ = sock.recvfrom(1024)
             return data.decode('ascii', errors='ignore') if data else ""
-        except socket.timeout:
-            return None
-        except Exception as e:
-            return f"ERR:{e}"
-        finally:
-            sock.close()
+        except socket.timeout: return None
+        except Exception as e: return f"ERR:{e}"
+        finally: sock.close()
 
     async def _send_tcp(packet_bytes, t_host, t_port, timeout):
         try:
@@ -110,22 +111,16 @@ async def async_setup_entry(hass: HomeAssistant, entry):
             writer.close()
             await writer.wait_closed()
             return data.decode('ascii', errors='ignore') if data else ""
-        except asyncio.TimeoutError:
-            return None
-        except Exception as e:
-            return f"ERR:{e}"
+        except asyncio.TimeoutError: return None
+        except Exception as e: return f"ERR:{e}"
 
     async def try_route(t_host, t_port, t_protocol, packet_bytes, timeout, retries):
         status = "Unknown Error"
         raw_resp = "None"
         for attempt in range(1, retries + 1):
-            if t_protocol == "UDP":
-                resp = await hass.async_add_executor_job(_send_udp_sync, packet_bytes, t_host, t_port, timeout)
-            else:
-                resp = await _send_tcp(packet_bytes, t_host, t_port, timeout)
-            
+            if t_protocol == "UDP": resp = await hass.async_add_executor_job(_send_udp_sync, packet_bytes, t_host, t_port, timeout)
+            else: resp = await _send_tcp(packet_bytes, t_host, t_port, timeout)
             raw_resp = resp if resp else "None"
-
             if resp is None: status = "Timeout (No Reply)"
             elif resp == "": status = "Connection Closed (No Data)"
             elif resp.startswith("ERR:"): status = f"Socket Error: {resp[4:]}"
@@ -133,9 +128,7 @@ async def async_setup_entry(hass: HomeAssistant, entry):
             elif "NAK" in resp: status = "NAK Received"
             elif "DUH" in resp: status = "DUH Received"
             else: status = f"Unknown Reply: {resp.strip()}"
-                
             if attempt < retries: await asyncio.sleep(2) 
-                
         return False, f"Failed: {status}", raw_resp
 
     async def send_event(code, zone=1, message="", url=""):
@@ -156,7 +149,6 @@ async def async_setup_entry(hass: HomeAssistant, entry):
         success = False
         last_reply = "None"
 
-        # 1. Primary Test (Failback)
         if mem["current_route"] == "secondary" and code == "RP":
             test_success, status, raw_resp = await try_route(p_host, p_port, p_proto, packet_bytes, timeout, 1)
             last_reply = raw_resp
@@ -164,16 +156,13 @@ async def async_setup_entry(hass: HomeAssistant, entry):
                 log_msgs.append(f"Primary Restored! ({status})")
                 mem["current_route"] = "primary"
                 success = True
-            else:
-                log_msgs.append(f"Primary Test: {status}")
+            else: log_msgs.append(f"Primary Test: {status}")
 
-        # 2. Main Routing Logic
         if not success:
             if mem["current_route"] == "primary":
                 success, status, raw_resp = await try_route(p_host, p_port, p_proto, packet_bytes, timeout, retries)
                 last_reply = raw_resp
                 log_msgs.append(f"Primary: {status}")
-                
                 if not success and s_host and s_port:
                     log_msgs.append("Switched Route -> Secondary")
                     mem["current_route"] = "secondary"
@@ -196,7 +185,6 @@ async def async_setup_entry(hass: HomeAssistant, entry):
         mem["history"].appendleft(event_data)
         async_dispatcher_send(hass, f"{DOMAIN}_{entry.entry_id}_event_added")
 
-    # --- POLLING ---
     async def handle_polling(now=None): await send_event("RP", 0, "Heartbeat")
 
     # --- ALARMO LISTENER ---
@@ -204,7 +192,6 @@ async def async_setup_entry(hass: HomeAssistant, entry):
         old_state = event.data.get("old_state")
         new_state = event.data.get("new_state")
         if not new_state or not old_state or old_state.state == new_state.state: return
-        
         mem = hass.data[DOMAIN][entry.entry_id]
 
         if old_state.state == "triggered" and new_state.state != "triggered":
@@ -258,34 +245,60 @@ async def async_setup_entry(hass: HomeAssistant, entry):
 
                 await send_event(sia_code, 1, f_name, url=photo_url)
 
-    # --- AC LISTENER ---
+    # --- TAMPER LISTENER ---
+    async def tamper_listener(event):
+        old_state = event.data.get("old_state")
+        new_state = event.data.get("new_state")
+        if not new_state or not old_state or old_state.state == new_state.state: return
+        
+        entity_id = event.data.get("entity_id")
+        sensor_obj = hass.states.get(entity_id)
+        f_name = sensor_obj.attributes.get("friendly_name", entity_id) if sensor_obj else entity_id
+        
+        if new_state.state == "on": await send_event("TA", 1, f"Tamper_{f_name}")
+        elif new_state.state == "off": await send_event("TR", 1, f"Restored_{f_name}")
+
+    # --- AC POWER EVALUATOR ---
+    def evaluate_ac_state(entity_id, new_state_str):
+        if entity_id == merged_conf.get("ac_binary_sensor"):
+            s_obj = hass.states.get(entity_id)
+            d_class = s_obj.attributes.get("device_class") if s_obj else None
+            return (new_state_str == "on") if d_class in ["problem", "battery"] else (new_state_str == "off")
+        elif entity_id == merged_conf.get("ac_numeric_sensor"):
+            try: return float(new_state_str) < float(merged_conf.get("ac_threshold", 0))
+            except ValueError: return False
+        elif entity_id == merged_conf.get("ac_string_sensor"):
+            s_upper = new_state_str.upper()
+            if "OB" in s_upper: return True    # On Battery (Trouble)
+            elif "OL" in s_upper: return False # On Line (Restored)
+        return None
+
     async def ac_listener(event):
         entity_id = event.data.get("entity_id")
         old_state = event.data.get("old_state")
         new_state = event.data.get("new_state")
         if not new_state or not old_state or old_state.state == new_state.state: return
+        
         mem = hass.data[DOMAIN][entry.entry_id]
         timers = mem["timers"]
-        is_trouble = False
-        if entity_id == merged_conf.get("ac_binary_sensor"):
-            sensor_obj = hass.states.get(entity_id)
-            d_class = sensor_obj.attributes.get("device_class") if sensor_obj else None
-            is_trouble = (new_state.state == "on") if d_class in ["problem", "battery"] else (new_state.state == "off")
-        elif entity_id == merged_conf.get("ac_numeric_sensor"):
-            try: is_trouble = float(new_state.state) < float(merged_conf.get("ac_threshold", 0))
-            except ValueError: return
+        
+        is_trouble = evaluate_ac_state(entity_id, new_state.state)
+        if is_trouble is None: return
 
         delay = merged_conf.get("ac_grace_period", 60)
         async def fire_ac_trouble(now):
             mem["ac_trouble"] = True
+            hass.async_create_task(save_storage())
             await send_event("AT", 0, "AC_Power_Lost")
         async def fire_ac_restore(now):
             mem["ac_trouble"] = False
+            hass.async_create_task(save_storage())
             await send_event("AR", 0, "AC_Power_Restored")
 
         if "ac" in timers:
             timers["ac"]()
             timers.pop("ac")
+            
         if is_trouble and not mem["ac_trouble"]:
             timers["ac"] = async_call_later(hass, delay, fire_ac_trouble)
         elif not is_trouble and mem["ac_trouble"]:
@@ -328,11 +341,15 @@ async def async_setup_entry(hass: HomeAssistant, entry):
 
     unsub_event = async_track_state_change_event(hass, alarm_entity, alarmo_listener)
     
-    ac_entities = [e for e in [merged_conf.get("ac_binary_sensor"), merged_conf.get("ac_numeric_sensor")] if e and isinstance(e, str)]
+    # Setup Listeners
+    ac_entities = [e for e in [merged_conf.get("ac_binary_sensor"), merged_conf.get("ac_numeric_sensor"), merged_conf.get("ac_string_sensor")] if e and isinstance(e, str)]
     unsub_ac = async_track_state_change_event(hass, ac_entities, ac_listener) if ac_entities else None
 
     offline_entities = merged_conf.get("offline_sensors", [])
     unsub_offline = async_track_state_change_event(hass, offline_entities, offline_listener) if offline_entities else None
+    
+    tamper_entities = merged_conf.get("tamper_sensors", [])
+    unsub_tamper = async_track_state_change_event(hass, tamper_entities, tamper_listener) if tamper_entities else None
 
     unsub_update = entry.add_update_listener(update_listener)
     
@@ -340,7 +357,28 @@ async def async_setup_entry(hass: HomeAssistant, entry):
     hass.data[DOMAIN][entry.entry_id]["unsub_event"] = unsub_event
     hass.data[DOMAIN][entry.entry_id]["unsub_ac"] = unsub_ac
     hass.data[DOMAIN][entry.entry_id]["unsub_offline"] = unsub_offline
+    hass.data[DOMAIN][entry.entry_id]["unsub_tamper"] = unsub_tamper
     hass.data[DOMAIN][entry.entry_id]["unsub_update"] = unsub_update
+
+    # --- BOOT SYNC FOR AC RESTORAL ---
+    async def check_ac_on_boot():
+        await asyncio.sleep(10) # Let HA states settle
+        mem = hass.data[DOMAIN][entry.entry_id]
+        if mem["ac_trouble"]:
+            # If storage says power is out, let's verify if it actually came back while HA was dead.
+            current_trouble = False
+            for ac_ent in ac_entities:
+                s_obj = hass.states.get(ac_ent)
+                if s_obj and evaluate_ac_state(ac_ent, s_obj.state):
+                    current_trouble = True
+                    break
+            if not current_trouble:
+                _LOGGER.info("SIA: AC Power was restored while Home Assistant was offline. Sending AR.")
+                mem["ac_trouble"] = False
+                await save_storage()
+                await send_event("AR", 0, "AC_Power_Restored")
+
+    hass.async_create_task(check_ac_on_boot())
 
     return True
 
@@ -350,7 +388,7 @@ async def update_listener(hass, entry):
 async def async_unload_entry(hass, entry):
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-    for key in ["unsub_interval", "unsub_event", "unsub_ac", "unsub_offline", "unsub_update"]:
+    for key in ["unsub_interval", "unsub_event", "unsub_ac", "unsub_offline", "unsub_tamper", "unsub_update"]:
         if key in data and callable(data[key]): data[key]()
     for timer_cancel in data.get("timers", {}).values(): timer_cancel()
     hass.data[DOMAIN].pop(entry.entry_id, None)
